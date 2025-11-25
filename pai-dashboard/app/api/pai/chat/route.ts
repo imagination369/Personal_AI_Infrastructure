@@ -1,14 +1,14 @@
 /**
  * PAI Chat API Route
  *
- * Handles chat interactions with the Personal AI (PAI) system.
- * In production, this would integrate with the actual PAI backend.
- * For demo purposes, it returns contextual mock responses.
+ * Handles chat interactions with the Personal AI (PAI) system using Claude API.
+ * Falls back to mock responses if Claude API is not configured.
  *
  * POST /api/pai/chat - Send a message to PAI and get a response
  */
 
 import { NextRequest, NextResponse } from 'next/server';
+import { getClaudeClient, ChatMessage as ClaudeMessage } from '@/lib/claude-client';
 
 // =============================================================================
 // Types
@@ -262,21 +262,54 @@ export async function POST(request: NextRequest): Promise<NextResponse<ChatRespo
       timestamp: new Date().toISOString(),
     });
 
-    // TODO: In production, this would:
-    // 1. Authenticate the user and get their PAI configuration
-    // 2. Prepare context from MCP servers (filesystem, database, etc.)
-    // 3. Call Claude API with the user's message and context
-    // 4. Process the response and extract any actions
-    // 5. Log the interaction for analytics and improvement
-    // 6. Return the AI-generated response
+    // Get Claude client
+    const claudeClient = getClaudeClient();
+    let responseMessage: string;
+    let isClaudeResponse = false;
 
-    // For demo, generate mock response
-    const responseMessage = generateMockResponse(body);
+    // Try to use Claude API if configured
+    if (claudeClient.isReady()) {
+      try {
+        console.log('Using Claude API for response...');
+
+        // Convert previous messages to Claude format
+        const claudeMessages: ClaudeMessage[] = (body.context?.previousMessages || [])
+          .filter(msg => msg.role !== 'system')
+          .map(msg => ({
+            role: msg.role as 'user' | 'assistant',
+            content: msg.content,
+          }));
+
+        // Get response from Claude
+        const result = await claudeClient.chat({
+          message: body.message,
+          context: body.context,
+          previousMessages: claudeMessages,
+        });
+
+        responseMessage = result.message;
+        isClaudeResponse = true;
+
+        console.log('Claude API response received:', {
+          model: result.model,
+          usage: result.usage,
+          stopReason: result.stopReason,
+        });
+      } catch (error) {
+        console.error('Error calling Claude API, falling back to mock:', error);
+        // Fall back to mock response
+        responseMessage = generateMockResponse(body);
+      }
+    } else {
+      console.log('Claude API not configured, using mock response');
+      // Use mock response when Claude is not configured
+      responseMessage = generateMockResponse(body);
+      await new Promise(resolve => setTimeout(resolve, 300)); // Simulate delay
+    }
+
+    // Generate suggestions and actions
     const suggestions = generateSuggestions(body);
     const actions = generateActions(body);
-
-    // Simulate slight processing delay for realism
-    await new Promise(resolve => setTimeout(resolve, 300));
 
     // Return successful response
     return NextResponse.json(
@@ -287,6 +320,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<ChatRespo
           timestamp: new Date().toISOString(),
           suggestions: suggestions.length > 0 ? suggestions : undefined,
           actions: actions.length > 0 ? actions : undefined,
+          source: isClaudeResponse ? 'claude' : 'mock',
         },
       },
       { status: 200 }
@@ -313,6 +347,10 @@ export async function POST(request: NextRequest): Promise<NextResponse<ChatRespo
 // =============================================================================
 
 export async function GET(request: NextRequest) {
+  const claudeClient = getClaudeClient();
+  const isConfigured = claudeClient.isReady();
+  const modelInfo = claudeClient.getModelInfo();
+
   return NextResponse.json({
     success: true,
     data: {
@@ -326,8 +364,11 @@ export async function GET(request: NextRequest) {
         'natural_language_search',
         'contextual_suggestions',
       ],
-      status: 'mock', // Will be 'connected' in production
-      message: 'Currently running in demo mode with mock responses',
+      status: isConfigured ? 'connected' : 'mock',
+      message: isConfigured
+        ? `Connected to Claude API (${modelInfo.model})`
+        : 'Claude API not configured. Using mock responses. Set ANTHROPIC_API_KEY to enable AI features.',
+      modelInfo: isConfigured ? modelInfo : undefined,
     },
   });
 }
